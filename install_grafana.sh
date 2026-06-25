@@ -136,6 +136,29 @@ if ! command -v openssl >/dev/null 2>&1; then
 fi
 echo "✓ Docker, git, and openssl found."
 
+# GPU check — Ollama needs the NVIDIA container toolkit to use the GPU.
+# Without it the model runs on CPU (14B model = 5-10 min/response).
+if command -v nvidia-smi >/dev/null 2>&1; then
+  if ! docker info 2>/dev/null | grep -q "nvidia"; then
+    echo "→ NVIDIA GPU detected but NVIDIA container toolkit not configured."
+    echo "  Installing nvidia-container-toolkit..."
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
+      sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+      sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+      sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    sudo apt-get update -qq
+    sudo apt-get install -y nvidia-container-toolkit
+    sudo nvidia-ctk runtime configure --runtime=docker
+    sudo systemctl restart docker
+    echo "✓ NVIDIA container toolkit installed and Docker restarted."
+  else
+    echo "✓ NVIDIA container toolkit configured."
+  fi
+else
+  echo "→ No NVIDIA GPU detected — Ollama will run on CPU."
+fi
+
 # Generate NetBox Django SECRET_KEY — 45 random bytes, base64-encoded (~60 chars).
 # A-Za-z0-9+/= are all valid for Django SECRET_KEY and safe as a YAML plain string.
 SECRET_KEY=$(openssl rand -base64 45 | tr -d '\n')
@@ -331,6 +354,13 @@ services:
       - ollama-data:/root/.ollama
     ports:
       - "${PORT_OLLAMA}"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   # ── RAG Agent ────────────────────────────────────────────
   # POST /query → embeds question (ollama), kNN-retrieves from the knowledge
