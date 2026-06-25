@@ -73,7 +73,7 @@ class Q(BaseModel):
 @app.post("/ask")
 async def ask(q: Q):
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=600) as client:
             r = await client.post(f"{AGENT_URL}/query",
                                   json={"question": q.question})
             return r.json()

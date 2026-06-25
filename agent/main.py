@@ -144,11 +144,15 @@ def query(req: QueryRequest):
         llm_r = httpx.post(
             f"{OLLAMA_HOST}/api/generate",
             json={"model": LLM_MODEL, "prompt": prompt, "stream": False},
-            timeout=120,
+            timeout=600,
         )
-        answer = llm_r.json().get("response", "")
+        raw = llm_r.json().get("response", "")
     except Exception as e:
         raise HTTPException(500, f"LLM call failed: {e}")
+
+    # phi4-reasoning emits its chain-of-thought wrapped in <think>...</think>.
+    # Return only the final answer after the closing tag (graceful if absent).
+    answer = raw.split("</think>")[-1].strip() if "</think>" in raw else raw.strip()
 
     return {
         "question":       req.question,

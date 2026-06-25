@@ -347,20 +347,23 @@ services:
       - "${PORT_GRAFANA}"
 
   # ── Ollama (LLM runtime) ─────────────────────────────────
+  # GPU access via the classic nvidia runtime (registered in /etc/docker/daemon.json
+  # by 'nvidia-ctk runtime configure' during prerequisites). The explicit
+  # NVIDIA_DRIVER_CAPABILITIES=compute,utility is REQUIRED — without "compute",
+  # only nvidia-smi works and Ollama's CUDA discovery hangs (watchdog timeout),
+  # silently falling back to CPU. The newer deploy.devices/CDI path does not
+  # reliably inject the compute libraries on Docker 29, so we avoid it.
   ollama:
     image: ollama/ollama:0.30.10
     restart: unless-stopped
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
       - ollama-data:/root/.ollama
     ports:
       - "${PORT_OLLAMA}"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
   # ── RAG Agent ────────────────────────────────────────────
   # POST /query → embeds question (ollama), kNN-retrieves from the knowledge
@@ -924,8 +927,10 @@ echo "✓ Wazuh stack is healthy."
 
 # Phase 3 — Application + Grafana
 cd "$INSTALL_DIR"
-echo "→ [Phase 3/3] Starting Agent and Chat UI..."
-if ! docker compose up -d agent chat-ui; then
+echo "→ [Phase 3/3] Building and starting Agent and Chat UI..."
+# --build forces a rebuild from current source so app-code changes always ship;
+# without it, a re-run reuses the previously cached image.
+if ! docker compose up -d --build agent chat-ui; then
   echo "ERROR: agent or chat-ui failed to start. Check:"
   echo "  cd ${INSTALL_DIR} && docker compose logs agent chat-ui"
   exit 1
