@@ -243,7 +243,10 @@ services:
       timeout: 5s
       retries: 5
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      # Postgres 18+ stores data in a version subdir; the volume must mount at
+      # /var/lib/postgresql (parent), NOT /var/lib/postgresql/data. Mounting the
+      # old path makes the 18+ image refuse to start ("unused mount/volume").
+      - postgres-data:/var/lib/postgresql
     ports:
       - "${PORT_POSTGRES}"
 
