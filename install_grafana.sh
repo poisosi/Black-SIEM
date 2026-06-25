@@ -330,24 +330,24 @@ services:
       - "${PORT_OLLAMA}"
 
   # ── RAG Agent ────────────────────────────────────────────
-  # Queries all sources and synthesises answers via LLM.
-  # Sources: wazuh.indexer, opensearch, postgres (NetBox), redis-cache, ollama.
-  # wazuh.indexer is reached over HTTPS with TLS verification OFF — same
-  # approach as Grafana's datasource. No CA cert mount (kept simple/consistent).
+  # POST /query → embeds question (ollama), kNN-retrieves from the knowledge
+  # base (runbooks-knn, attack-knn on the plain opensearch), answers via LLM.
+  # The knowledge base lives on the plain opensearch (no auth) — NOT on
+  # wazuh.indexer. WAZUH_API_URL/NETBOX_URL are used only by /health probes.
   agent:
     build: ./agent
     restart: unless-stopped
     depends_on:
       opensearch:
         condition: service_healthy
-      postgres:
-        condition: service_healthy
+      ollama:
+        condition: service_started
       netbox:
         condition: service_healthy
     environment:
-      - OPENSEARCH_HOST=https://wazuh.indexer:9200
-      - OPENSEARCH_USER=admin
-      - OPENSEARCH_PASS=SecretPassword
+      - OPENSEARCH_HOST=http://opensearch:9200
+      - OPENSEARCH_USER=
+      - OPENSEARCH_PASS=
       - REDIS_HOST=redis-cache
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${PASS}
@@ -951,11 +951,15 @@ echo "  Wazuh Indexer     → https://wazuh.indexer:9200  (admin / SecretPasswor
 echo "  OpenSearch (logs) → http://opensearch:9200       (no auth)"
 echo "  NetBox (Postgres) → postgres:5432/netbox         (netbox / ${PASS})"
 echo ""
-echo "RAG query paths:"
-echo "  Wazuh alerts  → agent queries https://wazuh.indexer:9200  (TLS, verification off)"
-echo "  Other logs    → agent queries http://opensearch:9200       (no auth)"
-echo "  Asset data    → agent reads postgres directly              (not via NetBox API)"
-echo "  Chat history  → agent reads/writes redis-cache             (key prefix: chat:)"
+echo "RAG query path (POST /query):"
+echo "  1. Embed question         → ollama (nomic-embed-text:v1.5)"
+echo "  2. kNN knowledge retrieval → opensearch:9200  indices: runbooks-knn, attack-knn"
+echo "  3. Generate answer        → ollama (phi4-reasoning:14b-plus-q4_K_M)"
+echo ""
+echo "  NOTE: the knowledge base is empty until you seed it. Until then /query"
+echo "  still answers, but from the LLM alone (no runbook grounding)."
+echo ""
+echo "Wazuh alerts are visualised in Grafana (Wazuh Indexer datasource), not via the agent."
 echo ""
 echo "All non-Wazuh components share password: ${PASS}"
 echo "Before going beyond a lab: rotate PASS in ${INSTALL_DIR}/docker-compose.yml"
