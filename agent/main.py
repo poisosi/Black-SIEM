@@ -29,6 +29,9 @@ WAZUH_URL    = os.getenv("WAZUH_API_URL",    "https://localhost:55000")
 NETBOX_URL   = os.getenv("NETBOX_URL",       "http://netbox:8080")
 NETBOX_TOKEN = os.getenv("NETBOX_TOKEN",     "")
 LLM_MODEL    = os.getenv("LLM_MODEL",        "phi4-reasoning:latest")
+# Set true only when LLM_MODEL is a vision model. With a text-only model (e.g.
+# Foundation-Sec-8B) sending images to Ollama errors — so we drop them instead.
+VISION_ENABLED = os.getenv("VISION_ENABLED", "false").lower() == "true"
 
 # parse OpenSearch URL into host + port
 _os_clean  = OS_HOST.replace("https://", "").replace("http://", "")
@@ -99,59 +102,101 @@ def health():
     return stati
 
 
+class FileAttachment(BaseModel):
+    name: str
+    content: str = ""        # extracted text; empty if binary/unsupported
+
+
 class QueryRequest(BaseModel):
-    question: str
+    question: str = ""
     top_k: int = 5
+    images: list[str] = []          # base64-encoded image bytes (no data: prefix)
+    files: list[FileAttachment] = []
 
 
 @app.post("/query")
 def query(req: QueryRequest):
-    # 1. embed
-    try:
-        emb_r = httpx.post(
-            f"{OLLAMA_HOST}/api/embeddings",
-            json={"model": "nomic-embed-text:v1.5", "prompt": req.question},
-            timeout=30,
-        )
-        embedding = emb_r.json()["embedding"]
-    except Exception as e:
-        raise HTTPException(500, f"Embedding failed: {e}")
-
-    # 2. k-NN retrieval
+    # 1. embed + 2. k-NN retrieval — only when there is a text question to
+    # retrieve against. Image-only / file-only queries skip retrieval gracefully.
     chunks = []
-    for idx in ("runbooks-knn", "attack-knn"):
+    if req.question.strip():
         try:
-            res = os_client.search(index=idx, body={
-                "size": req.top_k,
-                "query": {"knn": {"embedding": {"vector": embedding, "k": req.top_k}}},
-                "_source": ["content", "title"],
-            })
-            for hit in res["hits"]["hits"]:
-                s = hit["_source"]
-                chunks.append(f"[{s.get('title','?')}]\n{s.get('content','')}")
+            emb_r = httpx.post(
+                f"{OLLAMA_HOST}/api/embeddings",
+                json={"model": "nomic-embed-text:v1.5", "prompt": req.question},
+                timeout=30,
+            )
+            embedding = emb_r.json().get("embedding")
         except Exception:
-            pass
+            embedding = None
+
+        if embedding:
+            for idx in ("runbooks-knn", "attack-knn"):
+                try:
+                    res = os_client.search(index=idx, body={
+                        "size": req.top_k,
+                        "query": {"knn": {"embedding": {"vector": embedding, "k": req.top_k}}},
+                        "_source": ["content", "title"],
+                    })
+                    for hit in res["hits"]["hits"]:
+                        s = hit["_source"]
+                        chunks.append(f"[{s.get('title','?')}]\n{s.get('content','')}")
+                except Exception:
+                    pass
 
     context = "\n\n".join(chunks) or "No relevant entries found in knowledge base."
 
-    # 3. LLM answer
-    prompt = (
-        f"You are a SIEM security analyst assistant.\n\n"
+    # Fold any uploaded text-file contents into the prompt. Binary/unsupported
+    # files are mentioned by name only (the model can't read them — that's fine).
+    file_blocks = []
+    for f in req.files:
+        if f.content.strip():
+            file_blocks.append(f"[Attached file: {f.name}]\n{f.content}")
+        else:
+            file_blocks.append(f"[Attached file: {f.name} — not readable as text]")
+    files_text = "\n\n".join(file_blocks)
+
+    user_content = (
         f"Context:\n{context}\n\n"
-        f"Question: {req.question}\n\nAnswer:"
+        f"Question: {req.question.strip() or '(analyze the attached image/file)'}"
     )
+    if files_text:
+        user_content += f"\n\nUser-attached files:\n{files_text}"
+
+    user_msg = {"role": "user", "content": user_content}
+    if req.images:
+        if VISION_ENABLED:
+            user_msg["images"] = req.images          # Ollama vision: base64 list
+        else:
+            # text-only model: note the images but don't send them (would error)
+            user_msg["content"] += (
+                f"\n\n[{len(req.images)} image(s) attached, but the current model "
+                f"is text-only and cannot view images.]"
+            )
+
+    # 3. LLM answer — /api/chat applies the model's chat template (needed for
+    # vision models to attach images, and so reasoning models separate thinking).
     try:
         llm_r = httpx.post(
-            f"{OLLAMA_HOST}/api/generate",
-            json={"model": LLM_MODEL, "prompt": prompt, "stream": False},
+            f"{OLLAMA_HOST}/api/chat",
+            json={
+                "model": LLM_MODEL,
+                "messages": [
+                    {"role": "system",
+                     "content": "You are a SIEM security analyst assistant. Answer "
+                                "directly and concisely. If an image is attached, "
+                                "analyze it in a security context."},
+                    user_msg,
+                ],
+                "stream": False,
+            },
             timeout=600,
         )
-        raw = llm_r.json().get("response", "")
+        raw = llm_r.json().get("message", {}).get("content", "")
     except Exception as e:
         raise HTTPException(500, f"LLM call failed: {e}")
 
-    # phi4-reasoning emits its chain-of-thought wrapped in <think>...</think>.
-    # Return only the final answer after the closing tag (graceful if absent).
+    # Fallback: strip any leaked <think>...</think> reasoning.
     answer = raw.split("</think>")[-1].strip() if "</think>" in raw else raw.strip()
 
     return {

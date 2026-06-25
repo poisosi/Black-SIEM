@@ -79,6 +79,12 @@ GRAFANA_VERSION="13.0.2"
 WAZUH_OPENSEARCH_VERSION="2.19.5"
 PLAIN_OPENSEARCH_VERSION="3.7.0"
 
+# LLM served by Ollama. Cisco Foundation-Sec-8B — a cybersecurity-specialised model
+# (Llama-3.1-8B base, continued-pretrained by Cisco Foundation AI), Q6_K GGUF (~6.7GB)
+# pulled directly from Hugging Face. Text-only (no vision). Single source of truth —
+# referenced by the compose LLM_MODEL env and the model-pull step below.
+LLM_MODEL_TAG="hf.co/mradermacher/Foundation-Sec-8B-GGUF:Q6_K"
+
 # ============================================================
 # SECTION 2 — DOCKER & PREREQUISITES
 # ============================================================
@@ -388,7 +394,9 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${PASS}
       - OLLAMA_HOST=http://ollama:11434
-      - LLM_MODEL=phi4-reasoning:14b-plus-q4_K_M
+      - LLM_MODEL=${LLM_MODEL_TAG}
+      # Foundation-Sec-8B is text-only — keep false. Set true only for a vision model.
+      - VISION_ENABLED=false
       - WAZUH_API_URL=https://wazuh.manager:55000
       - NETBOX_URL=http://netbox:8080
       - NETBOX_TOKEN=
@@ -952,13 +960,13 @@ echo "✓ Grafana is healthy."
 # Ollama is running from Phase 1. Pull now so the first query
 # does not stall waiting for a large download.
 # ============================================================
-echo "→ Pulling Ollama model phi4-reasoning:14b-plus-q4_K_M — large download, may take several minutes..."
-if ! docker compose exec ollama ollama pull phi4-reasoning:14b-plus-q4_K_M; then
+echo "→ Pulling Ollama model ${LLM_MODEL_TAG} — large download, may take several minutes..."
+if ! docker compose exec ollama ollama pull "${LLM_MODEL_TAG}"; then
   echo "ERROR: model pull failed. Retry manually:"
-  echo "  cd ${INSTALL_DIR} && docker compose exec ollama ollama pull phi4-reasoning:14b-plus-q4_K_M"
+  echo "  cd ${INSTALL_DIR} && docker compose exec ollama ollama pull ${LLM_MODEL_TAG}"
   exit 1
 fi
-echo "✓ Model phi4-reasoning:14b-plus-q4_K_M ready."
+echo "✓ Model ${LLM_MODEL_TAG} ready."
 
 echo "→ Pulling Ollama embedding model nomic-embed-text:v1.5 (required for RAG /query)..."
 if ! docker compose exec ollama ollama pull nomic-embed-text:v1.5; then
@@ -982,7 +990,7 @@ echo "  Agent API:         http://localhost:8080"
 echo "  Grafana:           http://localhost:3001         admin / ${PASS}"
 echo "  OpenSearch:        http://localhost:9201         no auth  (non-Wazuh log sources)"
 echo "  Postgres:          localhost:5432                netbox / ${PASS}  db: netbox"
-echo "  Ollama:            http://localhost:11434        model: phi4-reasoning:14b-plus-q4_K_M"
+echo "  Ollama:            http://localhost:11434        model: ${LLM_MODEL_TAG}"
 echo ""
 echo "Grafana datasources (pre-configured — Connections → Data sources):"
 echo "  Wazuh Indexer     → https://wazuh.indexer:9200  (admin / SecretPassword, TLS skip verify)"
@@ -992,7 +1000,7 @@ echo ""
 echo "RAG query path (POST /query):"
 echo "  1. Embed question         → ollama (nomic-embed-text:v1.5)"
 echo "  2. kNN knowledge retrieval → opensearch:9200  indices: runbooks-knn, attack-knn"
-echo "  3. Generate answer        → ollama (phi4-reasoning:14b-plus-q4_K_M)"
+echo "  3. Generate answer        → ollama (${LLM_MODEL_TAG})"
 echo ""
 echo "  NOTE: the knowledge base is empty until you seed it. Until then /query"
 echo "  still answers, but from the LLM alone (no runbook grounding)."
