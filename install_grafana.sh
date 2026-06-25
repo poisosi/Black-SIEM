@@ -63,7 +63,7 @@ PORT_POSTGRES="5432:5432"
 PORT_NETBOX="8000:8080"
 PORT_OLLAMA="11434:11434"
 PORT_AGENT="8080:8080"
-PORT_CHATUI="3000:3000"
+PORT_CHATUI="3000:8088"
 PORT_GRAFANA="3001:3000"
 
 # Grafana — pin to current stable, never use :latest.
@@ -345,15 +345,17 @@ services:
       netbox:
         condition: service_healthy
     environment:
-      - OPENSEARCH_URL=http://opensearch:9200
-      - NETBOX_DB_URL=postgresql://netbox:${PASS_URLENC}@postgres:5432/netbox
-      - CHAT_REDIS_URL=redis://:${PASS_URLENC}@redis-cache:6379/0
-      - CHAT_REDIS_KEY_PREFIX=chat:
-      - OLLAMA_URL=http://ollama:11434
-      - WAZUH_INDEXER_URL=https://wazuh.indexer:9200
-      - WAZUH_INDEXER_USER=admin
-      - WAZUH_INDEXER_PASSWORD=SecretPassword
-      - WAZUH_INDEXER_VERIFY=false
+      - OPENSEARCH_HOST=https://wazuh.indexer:9200
+      - OPENSEARCH_USER=admin
+      - OPENSEARCH_PASS=SecretPassword
+      - REDIS_HOST=redis-cache
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${PASS}
+      - OLLAMA_HOST=http://ollama:11434
+      - LLM_MODEL=phi4-reasoning:14b-plus-q4_K_M
+      - WAZUH_API_URL=https://wazuh.manager:55000
+      - NETBOX_URL=http://netbox:8080
+      - NETBOX_TOKEN=
     ports:
       - "${PORT_AGENT}"
 
@@ -363,7 +365,8 @@ services:
     restart: unless-stopped
     depends_on: [agent]
     environment:
-      - AGENT_URL=http://agent:8080
+      - AGENT_HOST=agent
+      - AGENT_PORT=8080
     ports:
       - "${PORT_CHATUI}"
 
@@ -918,6 +921,14 @@ if ! docker compose exec ollama ollama pull phi4-reasoning:14b-plus-q4_K_M; then
   exit 1
 fi
 echo "✓ Model phi4-reasoning:14b-plus-q4_K_M ready."
+
+echo "→ Pulling Ollama embedding model nomic-embed-text:v1.5 (required for RAG /query)..."
+if ! docker compose exec ollama ollama pull nomic-embed-text:v1.5; then
+  echo "ERROR: embedding model pull failed. Retry manually:"
+  echo "  cd ${INSTALL_DIR} && docker compose exec ollama ollama pull nomic-embed-text:v1.5"
+  exit 1
+fi
+echo "✓ Model nomic-embed-text:v1.5 ready."
 
 # ============================================================
 # SECTION 12 — SUMMARY
